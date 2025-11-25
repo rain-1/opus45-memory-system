@@ -166,9 +166,30 @@ python -m opus_memory.run_discord_bot
 ### Bot Features
 
 - **Memory-Augmented Responses**: Retrieves relevant memories before responding
+- **Cross-Channel Context Awareness**: Remembers discussions from other channels in the same server, enabling context continuity across the community
 - **Selective Learning**: Only learns from trusted operators by default
 - **Identity Continuity**: Maintains consistent values across conversations
 - **Self-Directed Memory**: The bot decides what's worth remembering, not users
+
+#### Cross-Channel Context Awareness
+
+The bot maintains context awareness across different channels in the same Discord server. When responding in one channel, it can reference relevant discussions from other channels, enabling:
+
+- **Continuity**: The bot understands ongoing projects and themes across your community
+- **Context**: References discussions from #general when responding in #bot-chat
+- **Transparency**: The bot naturally mentions when it's referencing context from other channels
+- **Control**: Can be disabled via `OPUS_CROSS_CHANNEL_CONTEXT=false` environment variable
+
+This feature respects the principle of "actively discussed context" - the bot only persists meaningful conversations, not surveillance of all server activity.
+
+**Configuration:**
+```bash
+# Enable/disable cross-channel context (default: true)
+export OPUS_CROSS_CHANNEL_CONTEXT=true
+
+# Number of cross-channel memories to retrieve (default: 5)
+export OPUS_SERVER_CONTEXT_MEMORIES=5
+```
 
 ### Trust Model
 
@@ -194,6 +215,8 @@ This prevents:
 | `!memories` | Show memory statistics |
 | `!identity` | Show identity/values |
 | `!learn <type> <content>` | Directly teach the bot |
+| `!server-context` | Show context from other channels in the server |
+| `!channel-memories [channel]` | Show memories from a specific channel |
 | `!help` | Show help |
 
 *Commands require `OPUS_MEMORY_COMMANDS=true` and operator status.*

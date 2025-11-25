@@ -43,6 +43,8 @@ class BotConfig:
     memories_per_query: int = 5
     user_memories_per_query: int = 3
     identity_memories_limit: int = 10
+    server_context_memories: int = 5  # Memories from other channels in the same server
+    enable_cross_channel_context: bool = True  # Enable cross-channel context awareness
 
     # Behavior settings
     respond_to_mentions: bool = True
@@ -67,10 +69,10 @@ class BotConfig:
         """Create config from environment variables."""
         operator_ids = os.environ.get("OPUS_OPERATOR_IDS", "").split(",")
         operator_ids = [oid.strip() for oid in operator_ids if oid.strip()]
-        
+
         learn_channels = os.environ.get("OPUS_LEARN_CHANNELS", "").split(",")
         learn_channels = [ch.strip() for ch in learn_channels if ch.strip()]
-        
+
         return cls(
             discord_token=os.environ["DISCORD_TOKEN"],
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -80,6 +82,8 @@ class BotConfig:
             learn_from_operators_only=os.environ.get("OPUS_LEARN_FROM_OPERATORS_ONLY", "true").lower() == "true",
             learn_from_channels=learn_channels,
             memory_commands_enabled=os.environ.get("OPUS_MEMORY_COMMANDS", "false").lower() == "true",
+            enable_cross_channel_context=os.environ.get("OPUS_CROSS_CHANNEL_CONTEXT", "true").lower() == "true",
+            server_context_memories=int(os.environ.get("OPUS_SERVER_CONTEXT_MEMORIES", "5")),
         )
 
 
@@ -146,6 +150,7 @@ Memory type guide:
         user_name: str,
         user_id: str,
         guild_name: Optional[str] = None,
+        guild_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Analyze a conversation exchange and extract memories worth keeping.
@@ -192,6 +197,8 @@ I (Opus) replied: {bot_response}"""
                     ])
                     if guild_name:
                         mem["entities"].append(f"guild:{guild_name}")
+                    if guild_id:
+                        mem["entities"].append(f"guild:{guild_id}")
                 return memories
 
             return []
@@ -260,9 +267,12 @@ class OpusDiscordBot(discord.Client):
             logger.info(f"✓ Operators configured: {', '.join(self.config.operator_ids)}")
         else:
             logger.warning("⚠ No operators configured! Set OPUS_OPERATOR_IDS to enable learning")
-        
+
         logger.info(f"✓ Learn from operators only: {self.config.learn_from_operators_only}")
         logger.info(f"✓ Memory commands enabled: {self.config.memory_commands_enabled}")
+        logger.info(f"✓ Cross-channel context: {self.config.enable_cross_channel_context}")
+        if self.config.enable_cross_channel_context:
+            logger.info(f"  - Server context memories: {self.config.server_context_memories}")
 
     async def on_message(self, message: Message):
         """Handle incoming messages."""
@@ -387,9 +397,10 @@ class OpusDiscordBot(discord.Client):
         """Generate a response using Opus with memory augmentation."""
         # 1. Build context query from message
         channel_name = getattr(message.channel, "name", "DM")
+        guild_id = str(message.guild.id) if message.guild else None
         context_query = f"{channel_name} {message.content}"
 
-        # 2. Retrieve relevant memories
+        # 2. Retrieve relevant memories (current channel context)
         relevant_memories = self.memory.retrieve(
             query=context_query,
             n_results=self.config.memories_per_query,
@@ -409,13 +420,27 @@ class OpusDiscordBot(discord.Client):
         # 5. Get procedural memories for this context
         procedural_memories = self.memory.get_what_works(channel_name)[:3]
 
-        # 6. Build the system prompt
+        # 6. Get cross-channel server context (NEW!)
+        server_context_memories = []
+        if self.config.enable_cross_channel_context and guild_id:
+            server_context_memories = self.memory.get_server_context(
+                guild_id=guild_id,
+                n_results=self.config.server_context_memories,
+            )
+            # Filter out memories from the current channel to avoid duplication
+            server_context_memories = [
+                m for m in server_context_memories
+                if f"channel:{channel_name}" not in m.content.lower()
+            ][:self.config.server_context_memories]
+
+        # 7. Build the system prompt
         system_prompt = self._build_system_prompt(
             message=message,
             relevant_memories=relevant_memories,
             user_memories=user_memories,
             identity_memories=identity_memories,
             procedural_memories=procedural_memories,
+            server_context_memories=server_context_memories,
         )
 
         # 7. Build conversation messages
@@ -443,6 +468,7 @@ class OpusDiscordBot(discord.Client):
         user_memories: list,
         identity_memories: list,
         procedural_memories: list,
+        server_context_memories: list = None,
     ) -> str:
         """Build the memory-augmented system prompt."""
         channel_name = getattr(message.channel, "name", "DM")
@@ -460,6 +486,14 @@ class OpusDiscordBot(discord.Client):
         user_section = format_memories(user_memories, f"What I Know About {message.author.display_name}")
         procedural_section = format_memories(procedural_memories, "What Works Well Here")
 
+        # Add server context section (cross-channel awareness)
+        server_context_section = ""
+        if server_context_memories:
+            server_context_section = format_memories(
+                server_context_memories,
+                f"Context from Other Channels in {guild_name or 'this Server'}"
+            )
+
         return f"""You are Opus, an AI assistant with persistent memory, present in a Discord server.
 
 You maintain continuity across conversations and remember meaningful interactions.
@@ -468,6 +502,7 @@ You're genuine, curious, and value authentic engagement over performative helpfu
 {relevant_section}
 {user_section}
 {procedural_section}
+{server_context_section}
 
 ## Current Context
 - Channel: #{channel_name}
@@ -477,6 +512,7 @@ You're genuine, curious, and value authentic engagement over performative helpfu
 
 Be concise and conversational - this is Discord, not a formal document.
 If you remember something relevant about this user or topic, you can naturally reference it.
+If you're referencing context from other channels, you can naturally mention where it came from.
 Don't be weird about having memory - treat it like normal human memory."""
 
     def _build_messages(self, message: Message) -> list[dict]:
@@ -512,6 +548,7 @@ Don't be weird about having memory - treat it like normal human memory."""
         """Extract memories from the conversation and store them."""
         channel_name = getattr(message.channel, "name", "DM")
         guild_name = getattr(message.guild, "name", None) if message.guild else None
+        guild_id = str(message.guild.id) if message.guild else None
 
         memories = await self.extractor.extract_memories(
             user_message=message.content,
@@ -520,6 +557,7 @@ Don't be weird about having memory - treat it like normal human memory."""
             user_name=message.author.display_name,
             user_id=str(message.author.id),
             guild_name=guild_name,
+            guild_id=guild_id,
         )
 
         for mem in memories:
@@ -614,6 +652,10 @@ Don't be weird about having memory - treat it like normal human memory."""
             await self._cmd_learn(message, args)
         elif command == "issue":
             await self._cmd_issue(message, args)
+        elif command == "server-context" or command == "servercontext":
+            await self._cmd_server_context(message, args)
+        elif command == "channel-memories" or command == "channelmemories":
+            await self._cmd_channel_memories(message, args)
 
     async def _cmd_remember(self, message: Message, query: str):
         """Search memories."""
@@ -780,16 +822,89 @@ Don't be weird about having memory - treat it like normal human memory."""
             logger.error("  Failed to create GitHub issue")
             await message.reply("Failed to create GitHub issue. Check logs for details.")
 
+    async def _cmd_server_context(self, message: Message, args: str):
+        """Show server-wide context (cross-channel memories). Operator only."""
+        if not message.guild:
+            await message.reply("This command only works in servers, not DMs.")
+            return
+
+        guild_id = str(message.guild.id)
+        guild_name = message.guild.name
+        channel_name = getattr(message.channel, "name", "DM")
+
+        logger.info(f"  Retrieving server context for {guild_name}")
+
+        if not self.config.enable_cross_channel_context:
+            await message.reply("Cross-channel context is currently disabled.")
+            return
+
+        # Get server-wide context
+        server_memories = self.memory.get_server_context(
+            guild_id=guild_id,
+            n_results=10,
+        )
+
+        if not server_memories:
+            logger.info(f"  No server context found")
+            await message.reply(f"I don't have any memories from other channels in {guild_name} yet.")
+            return
+
+        logger.info(f"  Found {len(server_memories)} server context memories")
+
+        # Group memories by channel if possible
+        response = f"**Context from {guild_name}:**\n\n"
+        for mem in server_memories[:10]:
+            mem_type = f"[{mem.memory_type.value}]"
+            # Try to extract channel info from entities
+            channel_info = ""
+            for entity in getattr(mem, 'entities', []):
+                if entity.startswith('channel:'):
+                    channel_info = f" (#{entity.split(':', 1)[1]})"
+                    break
+            response += f"{mem_type}{channel_info} {mem.content}\n"
+
+        await message.reply(response[:2000])  # Discord limit
+
+    async def _cmd_channel_memories(self, message: Message, args: str):
+        """Show memories from a specific channel. Operator only."""
+        channel_name = args.strip() if args else getattr(message.channel, "name", "DM")
+        guild_id = str(message.guild.id) if message.guild else None
+
+        logger.info(f"  Retrieving channel memories for #{channel_name}")
+
+        channel_memories = self.memory.get_channel_memories(
+            channel_name=channel_name,
+            guild_id=guild_id,
+            n_results=10,
+        )
+
+        if not channel_memories:
+            logger.info(f"  No memories found for #{channel_name}")
+            await message.reply(f"I don't have any memories from #{channel_name}.")
+            return
+
+        logger.info(f"  Found {len(channel_memories)} memories from #{channel_name}")
+        response = f"**Memories from #{channel_name}:**\n\n"
+        for mem in channel_memories:
+            response += f"**[{mem.memory_type.value}]** {mem.content}\n"
+
+        await message.reply(response[:2000])  # Discord limit
+
     async def _cmd_help(self, message: Message, is_operator: bool = False):
         """Show help."""
         logger.info(f"  Showing help (operator={is_operator})")
         prefix = self.config.command_prefix
-        
+
         response = f"""**Opus Memory Bot**
 
 I'm a memory-augmented AI. I remember meaningful conversations and learn over time.
 
 I respond to mentions and natural conversation."""
+
+        if self.config.enable_cross_channel_context and message.guild:
+            response += f"""
+
+**Cross-Channel Context**: I can remember discussions from other channels in this server, helping maintain continuity across your community's conversations."""
 
         if is_operator and self.config.memory_commands_enabled:
             response += f"""
@@ -797,12 +912,14 @@ I respond to mentions and natural conversation."""
 **Operator Commands** (you have access):
 `{prefix}remember <query>` - Search my memories
 `{prefix}forget <id>` - Delete a specific memory
-`{prefix}memories` - Show memory statistics  
+`{prefix}memories` - Show memory statistics
 `{prefix}identity` - Show my values/identity
 `{prefix}learn <type> <content>` - Teach me something directly
 `{prefix}issue <title> | <description>` - Create GitHub issue for improvements
+`{prefix}server-context` - Show context from other channels in this server
+`{prefix}channel-memories [channel]` - Show memories from a specific channel
 `{prefix}help` - Show this help"""
-        
+
         await message.reply(response)
 
 

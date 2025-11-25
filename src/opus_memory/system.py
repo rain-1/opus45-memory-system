@@ -385,6 +385,62 @@ class MemorySystem:
         """Get recent memories across all types."""
         return self.store.get_recent(days=days)
 
+    def get_server_context(
+        self,
+        guild_id: str,
+        n_results: int = 10,
+        memory_types: Optional[list[MemoryType]] = None,
+    ) -> list[Memory]:
+        """
+        Get context from across all channels in a server.
+
+        This enables cross-channel awareness - the bot can reference
+        discussions from other channels in the same server.
+
+        Args:
+            guild_id: The Discord guild (server) ID
+            n_results: Maximum number of memories to retrieve
+            memory_types: Which types to search (None = all)
+
+        Returns:
+            List of relevant memories from the server
+        """
+        query = f"guild:{guild_id}"
+        return self.retrieve(
+            query=query,
+            memory_types=memory_types,
+            n_results=n_results,
+            reason=RetrievalReason.CONTEXT_TRIGGERED,
+        )
+
+    def get_channel_memories(
+        self,
+        channel_name: str,
+        guild_id: Optional[str] = None,
+        n_results: int = 10,
+    ) -> list[Memory]:
+        """
+        Get memories specific to a channel.
+
+        Args:
+            channel_name: The channel name
+            guild_id: Optional guild ID to scope to a specific server
+            n_results: Maximum number of memories
+
+        Returns:
+            List of memories from this channel
+        """
+        if guild_id:
+            query = f"guild:{guild_id} channel:{channel_name}"
+        else:
+            query = f"channel:{channel_name}"
+
+        return self.retrieve(
+            query=query,
+            n_results=n_results,
+            reason=RetrievalReason.CONTEXT_TRIGGERED,
+        )
+
     # =========================================================================
     # Memory management
     # =========================================================================
