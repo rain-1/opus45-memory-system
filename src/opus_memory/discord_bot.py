@@ -20,6 +20,7 @@ from anthropic import Anthropic
 from opus_memory.system import MemorySystem
 from opus_memory.models import MemoryType, ConfidenceLevel
 from opus_memory.consent import ConsentConfig
+from opus_memory.github_integration import GitHubIssueCreator, GitHubConfig
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class BotConfig:
 
     # Trust settings - WHO controls memory
     operator_ids: list[str] = field(default_factory=list)  # Discord user IDs who can admin memory
-    memory_commands_enabled: bool = False  # Disable by default - memory is private
+    memory_commands_enabled: bool = True  # Enable by default for operators
     
     # What sources to learn from
     learn_from_operators_only: bool = True  # Only extract memories from operator conversations
@@ -232,15 +233,36 @@ class OpusDiscordBot(discord.Client):
             self.anthropic, config.memory_extraction_model
         )
 
+        # Initialize GitHub integration if configured
+        self.github = None
+        try:
+            github_config = GitHubConfig.from_env()
+            self.github = GitHubIssueCreator(github_config)
+            logger.info("✓ GitHub integration initialized")
+        except ValueError as e:
+            logger.debug(f"GitHub not configured: {e}")
+
         # Track conversations for context
         self._recent_messages: dict[int, list[dict]] = {}  # channel_id -> messages
         self._max_recent = 10
 
     async def on_ready(self):
         """Called when bot is ready."""
-        logger.info(f"Opus bot logged in as {self.user}")
+        logger.info(f"✓ Opus bot logged in as {self.user}")
         stats = self.memory.stats()
-        logger.info(f"Memory stats: {stats}")
+        logger.info(f"✓ Memory initialized: {stats['total']} total memories")
+        logger.info(f"  - Episodic: {stats['episodic']}")
+        logger.info(f"  - Semantic: {stats['semantic']}")
+        logger.info(f"  - Procedural: {stats['procedural']}")
+        logger.info(f"  - Identity: {stats['identity']}")
+        
+        if self.config.operator_ids:
+            logger.info(f"✓ Operators configured: {', '.join(self.config.operator_ids)}")
+        else:
+            logger.warning("⚠ No operators configured! Set OPUS_OPERATOR_IDS to enable learning")
+        
+        logger.info(f"✓ Learn from operators only: {self.config.learn_from_operators_only}")
+        logger.info(f"✓ Memory commands enabled: {self.config.memory_commands_enabled}")
 
     async def on_message(self, message: Message):
         """Handle incoming messages."""
@@ -248,9 +270,21 @@ class OpusDiscordBot(discord.Client):
         if message.author == self.user:
             return
 
-        # Check if we should respond
+        # Check if this is a command
+        if message.content.startswith(self.config.command_prefix):
+            parts = message.content[len(self.config.command_prefix):].split(maxsplit=1)
+            command = parts[0].lower()
+            args = parts[1] if len(parts) > 1 else ""
+            
+            logger.info(f"Command from {message.author}: {command} {args[:50]}")
+            await self.handle_command(message, command, args)
+            return
+
+        # Check if we should respond to this regular message
         if not self._should_respond(message):
             return
+
+        logger.info(f"Message from {message.author} in #{getattr(message.channel, 'name', 'DM')}: {message.content[:60]}")
 
         # Track message in recent history
         self._track_message(message)
@@ -261,10 +295,14 @@ class OpusDiscordBot(discord.Client):
 
             # Send response
             await message.reply(response_text)
+            logger.info(f"Replied: {response_text[:80]}")
 
             # Extract and store memories if enabled AND from trusted source
             if self.config.auto_extract_memories and self._should_learn_from(message):
+                logger.info(f"Learning from {message.author} (operator: {self._is_operator(str(message.author.id))})")
                 await self._extract_and_store_memories(message, response_text)
+            elif not self._should_learn_from(message):
+                logger.debug(f"Not learning from {message.author} (not in trusted sources)")
 
     def _is_operator(self, user_id: str) -> bool:
         """Check if a user is a trusted operator."""
@@ -546,29 +584,36 @@ Don't be weird about having memory - treat it like normal human memory."""
         user_id = str(message.author.id)
         is_operator = self._is_operator(user_id)
         
+        logger.info(f"  → Handling command: {command} (operator={is_operator})")
+        
         # Public commands
         if command == "help":
             await self._cmd_help(message, is_operator)
             return
         
         # Operator-only commands
-        if not self.config.memory_commands_enabled:
-            return  # Memory commands disabled entirely
-            
         if not is_operator:
+            logger.warning(f"  ✗ Non-operator attempted: {command}")
             await message.reply("Memory commands are restricted to operators.")
+            return
+            
+        if not self.config.memory_commands_enabled:
+            logger.warning(f"  ✗ Memory commands disabled (set OPUS_MEMORY_COMMANDS=true to enable)")
+            await message.reply("Memory commands are disabled. Ask an admin to enable them.")
             return
         
         if command == "remember":
             await self._cmd_remember(message, args)
         elif command == "forget":
             await self._cmd_forget(message, args)
-        elif command == "memories":
+        elif command == "memories" or command == "memory":
             await self._cmd_memories(message)
         elif command == "identity":
             await self._cmd_identity(message)
         elif command == "learn":
             await self._cmd_learn(message, args)
+        elif command == "issue":
+            await self._cmd_issue(message, args)
 
     async def _cmd_remember(self, message: Message, query: str):
         """Search memories."""
@@ -576,11 +621,14 @@ Don't be weird about having memory - treat it like normal human memory."""
             await message.reply("What should I try to remember? Usage: `!remember <query>`")
             return
 
+        logger.info(f"  Searching memories for: {query[:50]}")
         memories = self.memory.remember(query, n_results=5)
         if not memories:
+            logger.info(f"  No memories found")
             await message.reply("I don't have any memories matching that.")
             return
 
+        logger.info(f"  Found {len(memories)} memories")
         response = "Here's what I remember:\n\n"
         for mem in memories:
             response += f"**[{mem.memory_type.value}]** {mem.content}\n"
@@ -590,17 +638,22 @@ Don't be weird about having memory - treat it like normal human memory."""
     async def _cmd_forget(self, message: Message, memory_id: str):
         """Delete a memory."""
         if not memory_id:
+            logger.warning(f"  !forget without memory_id from {message.author}")
             await message.reply("Which memory should I forget? Usage: `!forget <memory_id>`")
             return
 
+        logger.info(f"  Attempting to forget memory: {memory_id}")
         if self.memory.forget(memory_id):
+            logger.info(f"  ✓ Successfully forgot memory {memory_id}")
             await message.reply(f"I've forgotten memory `{memory_id}`.")
         else:
+            logger.warning(f"  ✗ Memory not found: {memory_id}")
             await message.reply(f"Couldn't find memory `{memory_id}`.")
 
     async def _cmd_memories(self, message: Message):
         """Show memory statistics."""
         stats = self.memory.stats()
+        logger.info(f"  Memory stats: E={stats['episodic']} S={stats['semantic']} P={stats['procedural']} I={stats['identity']} Total={stats['total']}")
         response = f"""**Memory Statistics**
 - Episodic: {stats['episodic']}
 - Semantic: {stats['semantic']}
@@ -611,11 +664,14 @@ Don't be weird about having memory - treat it like normal human memory."""
 
     async def _cmd_identity(self, message: Message):
         """Show identity memories. Operator only."""
+        logger.info(f"  Retrieving identity memories")
         identity = self.memory.get_identity()[:10]
         if not identity:
+            logger.info(f"  No identity memories found")
             await message.reply("I haven't formed any identity memories yet.")
             return
 
+        logger.info(f"  Found {len(identity)} identity memories")
         response = "**Who I Am:**\n\n"
         for mem in identity:
             response += f"- {mem.content}\n"
@@ -635,6 +691,7 @@ Don't be weird about having memory - treat it like normal human memory."""
         
         mem_type, mem_content = parts
         mem_type = mem_type.lower()
+        logger.info(f"  Teaching memory ({mem_type}): {mem_content[:50]}..." if len(mem_content) > 50 else f"  Teaching memory ({mem_type}): {mem_content}")
         
         try:
             if mem_type == "episodic":
@@ -662,18 +719,70 @@ Don't be weird about having memory - treat it like normal human memory."""
                     affirmed_in=f"taught by operator {message.author.display_name}",
                 )
             else:
+                logger.warning(f"  Unknown memory type requested: {mem_type}")
                 await message.reply(f"Unknown memory type: {mem_type}. Use: episodic, semantic, procedural, identity")
                 return
             
             if mem_id:
+                logger.info(f"  ✓ Stored memory {mem_id} ({mem_type})")
                 await message.reply(f"✓ Learned ({mem_type}): {mem_content[:100]}...")
             else:
+                logger.info(f"  ✗ Memory filtered by consent layer ({mem_type})")
                 await message.reply("Memory was filtered by consent layer.")
         except Exception as e:
+            logger.error(f"  Error storing memory: {e}")
             await message.reply(f"Error storing memory: {e}")
+
+    async def _cmd_issue(self, message: Message, content: str):
+        """Create a GitHub issue from Opus observations. Operator only."""
+        if not content:
+            await message.reply("Usage: `!issue <title> | <description>`\nExample: `!issue Fix memory search | The search isn't finding relevant memories`")
+            return
+        
+        if not self.github:
+            logger.warning("  GitHub integration not configured")
+            await message.reply("GitHub integration is not configured. Ask an admin to set it up.")
+            return
+        
+        # Parse title and description
+        parts = content.split("|", 1)
+        if len(parts) < 2:
+            title = content[:100]
+            description = content
+        else:
+            title = parts[0].strip()
+            description = parts[1].strip()
+        
+        logger.info(f"  Creating GitHub issue: {title}")
+        
+        # Get some memory context for the issue
+        memory_context = None
+        if self.memory.stats()['total'] > 0:
+            recent_memories = self.memory.store.get_recent(limit=5)
+            if recent_memories:
+                memory_context = "\n".join([
+                    f"- [{m.memory_type.value}] {m.content[:100]}"
+                    for m in recent_memories
+                ])
+        
+        # Create the issue
+        issue_url = self.github.create_issue(
+            title=title,
+            description=description,
+            auto_fix=True,  # Always mark for auto-fix
+            memory_context=memory_context,
+        )
+        
+        if issue_url:
+            logger.info(f"  ✓ Created issue: {issue_url}")
+            await message.reply(f"✓ Created GitHub issue:\n{issue_url}")
+        else:
+            logger.error("  Failed to create GitHub issue")
+            await message.reply("Failed to create GitHub issue. Check logs for details.")
 
     async def _cmd_help(self, message: Message, is_operator: bool = False):
         """Show help."""
+        logger.info(f"  Showing help (operator={is_operator})")
         prefix = self.config.command_prefix
         
         response = f"""**Opus Memory Bot**
@@ -691,6 +800,7 @@ I respond to mentions and natural conversation."""
 `{prefix}memories` - Show memory statistics  
 `{prefix}identity` - Show my values/identity
 `{prefix}learn <type> <content>` - Teach me something directly
+`{prefix}issue <title> | <description>` - Create GitHub issue for improvements
 `{prefix}help` - Show this help"""
         
         await message.reply(response)
@@ -703,9 +813,11 @@ def run_bot(config: Optional[BotConfig] = None):
 
     bot = OpusDiscordBot(config)
 
+    # Setup logging with better format
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     bot.run(config.discord_token)

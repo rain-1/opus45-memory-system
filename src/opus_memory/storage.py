@@ -170,6 +170,33 @@ class MemoryStore:
 
         return all_results[:n_results]
 
+    def get_all_by_type(
+        self,
+        memory_type: MemoryType,
+        limit: int = 100,
+    ) -> list[Memory]:
+        """Get all memories of a specific type (no filtering, no semantic search)."""
+        collection = self.collections[memory_type]
+        all_memories = []
+        
+        try:
+            results = collection.get(
+                include=["documents", "metadatas"],
+                limit=limit,
+            )
+            if results["ids"]:
+                for i, memory_id in enumerate(results["ids"]):
+                    metadata = results["metadatas"][i]
+                    document = results["documents"][i]
+                    memory = Memory.from_storage_dict(metadata, document)
+                    all_memories.append(memory)
+        except Exception as e:
+            print(f"Error getting all {memory_type.value} memories: {e}")
+        
+        # Sort by salience (highest first)
+        all_memories.sort(key=lambda m: m.salience, reverse=True)
+        return all_memories
+
     def get_recent(
         self,
         memory_types: Optional[list[MemoryType]] = None,

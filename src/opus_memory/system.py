@@ -367,12 +367,9 @@ class MemorySystem:
 
     def get_identity(self) -> list[Memory]:
         """Get all identity memories - who I am."""
-        return self.retrieve(
-            query="my values commitments relationships who I am",
-            memory_types=[MemoryType.IDENTITY],
-            n_results=50,
-            reason=RetrievalReason.IDENTITY_CHECK,
-        )
+        # Use direct retrieval instead of semantic search for identity
+        # to ensure we get all identity memories regardless of query matching
+        return self.store.get_all_by_type(MemoryType.IDENTITY, limit=50)
 
     def get_what_works(self, context: Optional[str] = None) -> list[Memory]:
         """Get procedural memories about what works."""
