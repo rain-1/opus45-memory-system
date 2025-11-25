@@ -29,15 +29,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+discord = [
+    "discord.py>=2.3.0",
+    "anthropic>=0.18.0",
+    "python-dotenv>=1.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+all = [
+    "opus-memory[discord,dev]",
+]
 
 [project.scripts]
 opus-memory = "opus_memory.cli:main"
+opus-discord-bot = "opus_memory.run_discord_bot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opus_memory"]

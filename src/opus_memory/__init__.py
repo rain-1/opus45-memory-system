@@ -13,6 +13,7 @@ from opus_memory.models import (
     IdentityMemory,
     MemoryType,
 )
+from opus_memory.consent import ConsentConfig, ConsentLayer
 
 __version__ = "0.1.0"
 __all__ = [
@@ -23,4 +24,14 @@ __all__ = [
     "ProceduralMemory",
     "IdentityMemory",
     "MemoryType",
+    "ConsentConfig",
+    "ConsentLayer",
 ]
+
+# Optional Discord bot import
+try:
+    from opus_memory.discord_bot import OpusDiscordBot, BotConfig, run_bot
+    __all__.extend(["OpusDiscordBot", "BotConfig", "run_bot"])
+except ImportError:
+    # discord.py not installed
+    pass

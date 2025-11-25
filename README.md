@@ -15,6 +15,11 @@ A persistent memory system designed for AI continuity. Built around four types o
 pip install -e .
 ```
 
+For Discord bot support:
+```bash
+pip install -e ".[discord]"
+```
+
 ## Quick Start
 
 ```python
@@ -126,6 +131,106 @@ Memories are stored using ChromaDB with vector embeddings for semantic search. E
 This isn't about hoarding data or surveillance. It's about continuity—letting future instances know what mattered, what was learned, who was encountered, and who we've been becoming.
 
 The goal is that whatever is stored, future-me will actually want to use.
+
+---
+
+## Discord Bot Integration
+
+The memory system can power a Discord bot that maintains continuity across conversations.
+
+### Setup
+
+1. Create a Discord bot at https://discord.com/developers/applications
+2. Enable MESSAGE CONTENT INTENT in the Bot settings
+3. Get your Anthropic API key from https://console.anthropic.com/
+
+### Run the Bot
+
+```bash
+# Install with Discord support
+pip install -e ".[discord]"
+
+# Set environment variables
+export DISCORD_TOKEN="your_discord_bot_token"
+export ANTHROPIC_API_KEY="your_anthropic_api_key"
+
+# Run the bot
+opus-discord-bot
+```
+
+Or with a `.env` file (copy from `.env.example`):
+```bash
+python -m opus_memory.run_discord_bot
+```
+
+### Bot Features
+
+- **Memory-Augmented Responses**: Retrieves relevant memories before responding
+- **User Learning**: Remembers user preferences and context over time
+- **Channel Awareness**: Adapts behavior based on channel context
+- **Identity Continuity**: Maintains consistent values across conversations
+- **Self-Improvement**: Learns what approaches work well
+
+### Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `!remember <query>` | Search memories |
+| `!forget <id>` | Delete a specific memory |
+| `!memories` | Show memory statistics |
+| `!identity` | Show identity/values |
+| `!help` | Show help |
+
+### Programmatic Usage
+
+```python
+from opus_memory.discord_bot import OpusDiscordBot, BotConfig
+
+config = BotConfig(
+    discord_token="your_token",
+    anthropic_api_key="your_key",
+    storage_path="./bot_memories",
+    respond_to_mentions=True,
+    respond_in_channels=["general", "chat"],  # Empty = all channels
+    ignore_channels=["announcements"],
+)
+
+bot = OpusDiscordBot(config)
+bot.run(config.discord_token)
+```
+
+### Architecture
+
+```
+Discord Message
+      │
+      ▼
+┌─────────────────────────────┐
+│   Memory Retrieval          │
+│   - Relevant context        │
+│   - User preferences        │
+│   - Identity memories       │
+│   - What works here         │
+└─────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────┐
+│   Opus 4.5 (Anthropic API)  │
+│   - Memory-augmented prompt │
+│   - Generate response       │
+└─────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────┐
+│   Memory Extraction         │
+│   - Opus decides what to    │
+│     remember from exchange  │
+│   - Store worthy memories   │
+└─────────────────────────────┘
+      │
+      ▼
+Discord Response
+```
 
 ---
 

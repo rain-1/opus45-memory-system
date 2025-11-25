@@ -1,3 +1,8 @@
 memories/
 *.pyc
 __pycache__/
+.env
+.venv/
+*.egg-info/
+dist/
+build/
