@@ -166,12 +166,26 @@ python -m opus_memory.run_discord_bot
 ### Bot Features
 
 - **Memory-Augmented Responses**: Retrieves relevant memories before responding
-- **User Learning**: Remembers user preferences and context over time
-- **Channel Awareness**: Adapts behavior based on channel context
+- **Selective Learning**: Only learns from trusted operators by default
 - **Identity Continuity**: Maintains consistent values across conversations
-- **Self-Improvement**: Learns what approaches work well
+- **Self-Directed Memory**: The bot decides what's worth remembering, not users
 
-### Bot Commands
+### Trust Model
+
+Memory is private and protected. By default:
+
+- **Only operators** can trigger memory extraction (via conversation)
+- **Memory commands are disabled** by default
+- **Users cannot query or manipulate memory** directly
+- **The bot decides** what's meaningful enough to remember
+
+This prevents:
+- Random users injecting false memories
+- Trolls/spam corrupting the memory store  
+- Manipulation of the bot's learned behaviors
+- Privacy leaks through memory queries
+
+### Bot Commands (Operator-Only)
 
 | Command | Description |
 |---------|-------------|
@@ -179,7 +193,10 @@ python -m opus_memory.run_discord_bot
 | `!forget <id>` | Delete a specific memory |
 | `!memories` | Show memory statistics |
 | `!identity` | Show identity/values |
+| `!learn <type> <content>` | Directly teach the bot |
 | `!help` | Show help |
+
+*Commands require `OPUS_MEMORY_COMMANDS=true` and operator status.*
 
 ### Programmatic Usage
 
@@ -190,9 +207,16 @@ config = BotConfig(
     discord_token="your_token",
     anthropic_api_key="your_key",
     storage_path="./bot_memories",
+    
+    # Response settings
     respond_to_mentions=True,
-    respond_in_channels=["general", "chat"],  # Empty = all channels
+    respond_in_channels=["general", "chat"],
     ignore_channels=["announcements"],
+    
+    # Trust settings - IMPORTANT
+    operator_ids=["123456789"],  # Your Discord user ID
+    learn_from_operators_only=True,  # Only learn from your conversations
+    memory_commands_enabled=False,  # Keep memory private
 )
 
 bot = OpusDiscordBot(config)

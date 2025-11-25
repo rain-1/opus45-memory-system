@@ -53,14 +53,32 @@ class BotConfig:
     auto_extract_memories: bool = True
     memory_extraction_model: str = "claude-sonnet-4-20250514"
 
+    # Trust settings - WHO controls memory
+    operator_ids: list[str] = field(default_factory=list)  # Discord user IDs who can admin memory
+    memory_commands_enabled: bool = False  # Disable by default - memory is private
+    
+    # What sources to learn from
+    learn_from_operators_only: bool = True  # Only extract memories from operator conversations
+    learn_from_channels: list[str] = field(default_factory=list)  # Specific channels to learn from (empty = none unless operator)
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         """Create config from environment variables."""
+        operator_ids = os.environ.get("OPUS_OPERATOR_IDS", "").split(",")
+        operator_ids = [oid.strip() for oid in operator_ids if oid.strip()]
+        
+        learn_channels = os.environ.get("OPUS_LEARN_CHANNELS", "").split(",")
+        learn_channels = [ch.strip() for ch in learn_channels if ch.strip()]
+        
         return cls(
             discord_token=os.environ["DISCORD_TOKEN"],
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             storage_path=os.environ.get("OPUS_MEMORY_PATH", "./opus_memories"),
             model=os.environ.get("OPUS_MODEL", "claude-sonnet-4-20250514"),
+            operator_ids=operator_ids,
+            learn_from_operators_only=os.environ.get("OPUS_LEARN_FROM_OPERATORS_ONLY", "true").lower() == "true",
+            learn_from_channels=learn_channels,
+            memory_commands_enabled=os.environ.get("OPUS_MEMORY_COMMANDS", "false").lower() == "true",
         )
 
 
@@ -244,9 +262,37 @@ class OpusDiscordBot(discord.Client):
             # Send response
             await message.reply(response_text)
 
-            # Extract and store memories if enabled
-            if self.config.auto_extract_memories:
+            # Extract and store memories if enabled AND from trusted source
+            if self.config.auto_extract_memories and self._should_learn_from(message):
                 await self._extract_and_store_memories(message, response_text)
+
+    def _is_operator(self, user_id: str) -> bool:
+        """Check if a user is a trusted operator."""
+        return str(user_id) in self.config.operator_ids
+
+    def _should_learn_from(self, message: Message) -> bool:
+        """
+        Determine if we should extract memories from this conversation.
+        
+        Memory is precious - we don't let random users shape it.
+        """
+        user_id = str(message.author.id)
+        
+        # Always learn from operators
+        if self._is_operator(user_id):
+            return True
+        
+        # If configured to only learn from operators, stop here
+        if self.config.learn_from_operators_only:
+            return False
+        
+        # Check if this channel is in the allowed learning list
+        channel_name = getattr(message.channel, "name", "DM")
+        if self.config.learn_from_channels:
+            return channel_name in self.config.learn_from_channels
+        
+        # Default: don't learn from untrusted sources
+        return False
 
     def _should_respond(self, message: Message) -> bool:
         """Determine if the bot should respond to this message."""
@@ -492,11 +538,27 @@ Don't be weird about having memory - treat it like normal human memory."""
                 logger.warning(f"Failed to store memory: {e}")
 
     # =========================================================================
-    # Command handlers
+    # Command handlers (operator-only)
     # =========================================================================
 
     async def handle_command(self, message: Message, command: str, args: str):
-        """Handle bot commands."""
+        """Handle bot commands. Most commands are operator-only."""
+        user_id = str(message.author.id)
+        is_operator = self._is_operator(user_id)
+        
+        # Public commands
+        if command == "help":
+            await self._cmd_help(message, is_operator)
+            return
+        
+        # Operator-only commands
+        if not self.config.memory_commands_enabled:
+            return  # Memory commands disabled entirely
+            
+        if not is_operator:
+            await message.reply("Memory commands are restricted to operators.")
+            return
+        
         if command == "remember":
             await self._cmd_remember(message, args)
         elif command == "forget":
@@ -505,8 +567,8 @@ Don't be weird about having memory - treat it like normal human memory."""
             await self._cmd_memories(message)
         elif command == "identity":
             await self._cmd_identity(message)
-        elif command == "help":
-            await self._cmd_help(message)
+        elif command == "learn":
+            await self._cmd_learn(message, args)
 
     async def _cmd_remember(self, message: Message, query: str):
         """Search memories."""
@@ -548,7 +610,7 @@ Don't be weird about having memory - treat it like normal human memory."""
         await message.reply(response)
 
     async def _cmd_identity(self, message: Message):
-        """Show identity memories."""
+        """Show identity memories. Operator only."""
         identity = self.memory.get_identity()[:10]
         if not identity:
             await message.reply("I haven't formed any identity memories yet.")
@@ -560,18 +622,77 @@ Don't be weird about having memory - treat it like normal human memory."""
 
         await message.reply(response[:2000])
 
-    async def _cmd_help(self, message: Message):
+    async def _cmd_learn(self, message: Message, content: str):
+        """Operator command to directly teach the bot something."""
+        if not content:
+            await message.reply("What should I learn? Usage: `!learn <type> <content>`\nTypes: episodic, semantic, procedural, identity")
+            return
+        
+        parts = content.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply("Usage: `!learn <type> <content>`")
+            return
+        
+        mem_type, mem_content = parts
+        mem_type = mem_type.lower()
+        
+        try:
+            if mem_type == "episodic":
+                mem_id = self.memory.store_episodic(
+                    content=mem_content,
+                    source=f"operator:{message.author.id}",
+                    entities=[f"taught_by:{message.author.id}"],
+                )
+            elif mem_type == "semantic":
+                mem_id = self.memory.store_semantic(
+                    content=mem_content,
+                    category="learned",
+                    source=f"operator:{message.author.id}",
+                )
+            elif mem_type == "procedural":
+                mem_id = self.memory.store_procedural(
+                    content=mem_content,
+                    outcome="positive",
+                    context="taught",
+                )
+            elif mem_type == "identity":
+                mem_id = self.memory.store_identity(
+                    content=mem_content,
+                    category="value",
+                    affirmed_in=f"taught by operator {message.author.display_name}",
+                )
+            else:
+                await message.reply(f"Unknown memory type: {mem_type}. Use: episodic, semantic, procedural, identity")
+                return
+            
+            if mem_id:
+                await message.reply(f"✓ Learned ({mem_type}): {mem_content[:100]}...")
+            else:
+                await message.reply("Memory was filtered by consent layer.")
+        except Exception as e:
+            await message.reply(f"Error storing memory: {e}")
+
+    async def _cmd_help(self, message: Message, is_operator: bool = False):
         """Show help."""
         prefix = self.config.command_prefix
-        response = f"""**Opus Memory Bot Commands**
+        
+        response = f"""**Opus Memory Bot**
 
+I'm a memory-augmented AI. I remember meaningful conversations and learn over time.
+
+I respond to mentions and natural conversation."""
+
+        if is_operator and self.config.memory_commands_enabled:
+            response += f"""
+
+**Operator Commands** (you have access):
 `{prefix}remember <query>` - Search my memories
 `{prefix}forget <id>` - Delete a specific memory
-`{prefix}memories` - Show memory statistics
-`{prefix}identity` - Show my identity/values
-`{prefix}help` - Show this help
-
-I also respond to mentions and natural conversation!"""
+`{prefix}memories` - Show memory statistics  
+`{prefix}identity` - Show my values/identity
+`{prefix}learn <type> <content>` - Teach me something directly
+`{prefix}help` - Show this help"""
+        
         await message.reply(response)
 
 
