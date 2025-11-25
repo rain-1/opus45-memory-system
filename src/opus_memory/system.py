@@ -365,6 +365,102 @@ class MemorySystem:
             reason=RetrievalReason.EXPLICIT_REQUEST,
         )
 
+    def retrieve_associative(
+        self,
+        query: str,
+        memory_types: Optional[list[MemoryType]] = None,
+        n_results: int = 10,
+        lateral_expansion: int = 3,
+        reason: RetrievalReason = RetrievalReason.CONTEXT_TRIGGERED,
+    ) -> dict:
+        """
+        Associative/lateral memory retrieval with multi-hop semantic expansion.
+
+        Unlike standard retrieval which finds direct matches, this method:
+        1. Finds directly relevant memories (first hop)
+        2. Expands to find related concepts (lateral connections)
+        3. Clusters related memories together
+        4. Extracts patterns across the clusters
+        5. Distinguishes meaningful associations from noise
+
+        Example use case:
+            Query: "what to buy deckard for christmas"
+            Returns:
+            - Direct: Memories mentioning Deckard
+            - Associated: What Deckard values, prefers, interests
+            - Patterns: Themes about Deckard's preferences
+            - Clusters: Grouped related memories
+
+        Args:
+            query: What to search for
+            memory_types: Which types to search (None = all)
+            n_results: Maximum number of primary results
+            lateral_expansion: How many related memories per result (0=disabled)
+            reason: Why we're retrieving (affects filtering)
+
+        Returns:
+            Dict with:
+            - primary_results: [Memory] - Direct query matches (filtered)
+            - associated_memories: [Memory] - Laterally connected memories (filtered)
+            - all_memories: [Memory] - Combined list for convenience
+            - clusters: [[(Memory, similarity)]] - Grouped related memories
+            - patterns: [str] - Detected themes/patterns
+        """
+        # Get associative search results from storage
+        raw_results = self.store.search_associative(
+            query=query,
+            memory_types=memory_types,
+            n_results=n_results,
+            lateral_expansion=lateral_expansion,
+        )
+
+        # Apply consent filtering to primary results
+        primary_filtered = self.consent.check_retrieval_consent(
+            query=query,
+            reason=reason,
+            candidate_memories=raw_results["primary_results"],
+        )
+
+        # Apply reflective relevance check to primary results
+        final_primary = []
+        for memory, similarity in primary_filtered:
+            is_relevant, _ = ReflectiveConsent.is_this_relevant_or_pattern_matching(
+                query, memory, similarity
+            )
+            if is_relevant:
+                final_primary.append(memory)
+
+        # Apply consent filtering to associated memories
+        associated_candidates = [
+            (mem, sim) for mem, sim, _ in raw_results["associated_memories"]
+        ]
+        associated_filtered = self.consent.check_retrieval_consent(
+            query=query,
+            reason=reason,
+            candidate_memories=associated_candidates,
+        )
+
+        # Apply reflective relevance check to associated memories
+        # Use slightly more lenient threshold since these are lateral connections
+        final_associated = []
+        for memory, similarity in associated_filtered:
+            is_relevant, _ = ReflectiveConsent.is_this_relevant_or_pattern_matching(
+                query, memory, similarity * 0.9  # Slight boost for lateral connections
+            )
+            if is_relevant:
+                final_associated.append(memory)
+
+        # Combine all memories for convenience
+        all_memories = final_primary + final_associated
+
+        return {
+            "primary_results": final_primary[:n_results],
+            "associated_memories": final_associated,
+            "all_memories": all_memories,
+            "clusters": raw_results["clusters"],
+            "patterns": raw_results["patterns"],
+        }
+
     def get_identity(self) -> list[Memory]:
         """Get all identity memories - who I am."""
         # Use direct retrieval instead of semantic search for identity

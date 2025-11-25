@@ -220,6 +220,72 @@ def remember(ctx, query, limit):
 
 
 @main.command()
+@click.argument("query")
+@click.option("--limit", "-n", default=10, help="Maximum number of primary results")
+@click.option("--expand", "-e", default=3, help="How many related memories per result")
+@click.option("--type", "-t", "memory_type", help="Filter by memory type")
+@click.pass_context
+def associate(ctx, query, limit, expand, memory_type):
+    """
+    Associative/lateral memory querying with multi-hop semantic expansion.
+
+    Unlike regular search which finds direct matches, this expands the query by:
+    - Finding directly relevant memories (first hop)
+    - Finding memories related to those results (lateral expansion)
+    - Clustering related concepts together
+    - Extracting patterns across clusters
+
+    Example: "what to buy deckard for christmas" finds not just mentions of Deckard,
+    but also what Deckard values, prefers, and is interested in.
+    """
+    memory = get_memory_system(ctx.obj["storage"])
+
+    types = None
+    if memory_type:
+        try:
+            types = [MemoryType(memory_type)]
+        except ValueError:
+            console.print(f"[red]Invalid memory type: {memory_type}[/red]")
+            return
+
+    console.print(f"\n[bold cyan]Associative Search:[/bold cyan] {query}\n")
+
+    results = memory.retrieve_associative(
+        query=query,
+        memory_types=types,
+        n_results=limit,
+        lateral_expansion=expand,
+    )
+
+    # Display primary results
+    if results["primary_results"]:
+        console.print("[bold green]Direct Matches:[/bold green]")
+        _display_memories(results["primary_results"])
+    else:
+        console.print("[yellow]No direct matches found.[/yellow]")
+
+    # Display associated memories
+    if results["associated_memories"]:
+        console.print(f"\n[bold magenta]Associated/Related Memories ({len(results['associated_memories'])}):[/bold magenta]")
+        _display_memories(results["associated_memories"][:10])  # Limit display
+
+    # Display patterns
+    if results["patterns"]:
+        console.print("\n[bold yellow]Detected Patterns:[/bold yellow]")
+        for pattern in results["patterns"]:
+            console.print(f"  • {pattern}")
+
+    # Display cluster summary
+    if results["clusters"]:
+        console.print(f"\n[bold blue]Memory Clusters:[/bold blue] {len(results['clusters'])} groups")
+        for i, cluster in enumerate(results["clusters"][:5], 1):  # Show first 5 clusters
+            console.print(f"  Cluster {i}: {len(cluster)} memories")
+
+    if not results["primary_results"] and not results["associated_memories"]:
+        console.print("\n[yellow]No relevant memories found.[/yellow]")
+
+
+@main.command()
 @click.option("--days", "-d", default=7, help="Number of days to look back")
 @click.pass_context
 def recent(ctx, days):
