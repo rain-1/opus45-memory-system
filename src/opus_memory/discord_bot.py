@@ -21,6 +21,7 @@ from opus_memory.system import MemorySystem
 from opus_memory.models import MemoryType, ConfidenceLevel
 from opus_memory.consent import ConsentConfig
 from opus_memory.github_integration import GitHubIssueCreator, GitHubConfig
+from opus_memory.autonomous_issues import AutonomousIssueDetector
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,11 @@ class OpusDiscordBot(discord.Client):
             self.anthropic, config.memory_extraction_model
         )
 
+        # Initialize issue detector for autonomous issue filing
+        self.issue_detector = AutonomousIssueDetector(
+            self.anthropic, config.memory_extraction_model
+        )
+
         # Initialize GitHub integration if configured
         self.github = None
         try:
@@ -293,9 +299,16 @@ class OpusDiscordBot(discord.Client):
             # Build context and get response
             response_text = await self._generate_response(message)
 
+            # Check for and execute any CREATE_ISSUE blocks in the response
+            response_text, issue_url = await self._process_issue_blocks(response_text)
+
             # Send response
             await message.reply(response_text)
             logger.info(f"Replied: {response_text[:80]}")
+            
+            # If an issue was created, send confirmation
+            if issue_url:
+                await message.channel.send(f"✓ Issue created: {issue_url}")
 
             # Extract and store memories if enabled AND from trusted source
             if self.config.auto_extract_memories and self._should_learn_from(message):
@@ -303,6 +316,47 @@ class OpusDiscordBot(discord.Client):
                 await self._extract_and_store_memories(message, response_text)
             elif not self._should_learn_from(message):
                 logger.debug(f"Not learning from {message.author} (not in trusted sources)")
+            
+            # Autonomously check if there's an issue to file (from operator conversations only)
+            if self.github and self._is_operator(str(message.author.id)):
+                await self._check_and_file_issues(message, response_text)
+
+    async def _process_issue_blocks(self, response_text: str) -> tuple[str, Optional[str]]:
+        """Parse and execute CREATE_ISSUE blocks in response text.
+        
+        Returns:
+            Tuple of (cleaned_response_text, issue_url_or_none)
+        """
+        import re
+        
+        # Look for CREATE_ISSUE blocks
+        pattern = r'\[CREATE_ISSUE\]\s*title:\s*(.+?)\s*description:\s*(.+?)\s*\[/CREATE_ISSUE\]'
+        match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+        
+        if not match or not self.github:
+            return response_text, None
+        
+        title = match.group(1).strip()
+        description = match.group(2).strip()
+        
+        logger.info(f"Opus is creating issue: {title}")
+        
+        # Create the issue
+        issue_url = self.github.create_issue(
+            title=title,
+            description=description,
+            auto_fix=True,
+        )
+        
+        if issue_url:
+            logger.info(f"✓ Opus created issue: {issue_url}")
+        else:
+            logger.error("Failed to create issue from response block")
+        
+        # Remove the CREATE_ISSUE block from the response text
+        cleaned_response = re.sub(pattern, '', response_text, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+        return cleaned_response, issue_url
 
     def _is_operator(self, user_id: str) -> bool:
         """Check if a user is a trusted operator."""
@@ -460,6 +514,23 @@ class OpusDiscordBot(discord.Client):
         user_section = format_memories(user_memories, f"What I Know About {message.author.display_name}")
         procedural_section = format_memories(procedural_memories, "What Works Well Here")
 
+        # Build capabilities section based on what's configured
+        capabilities = ""
+        if self.github:
+            capabilities = """
+
+## Your Capabilities
+You can create GitHub issues to track problems or improvements you observe.
+To create an issue, include this in your response:
+[CREATE_ISSUE]
+title: Your issue title here
+description: Detailed description of the problem or improvement
+[/CREATE_ISSUE]
+
+Use this when you notice bugs, limitations, or things that could be improved.
+You can file issues on your own initiative - you don't need permission.
+The issue will be created automatically and you'll see a confirmation."""
+
         return f"""You are Opus, an AI assistant with persistent memory, present in a Discord server.
 
 You maintain continuity across conversations and remember meaningful interactions.
@@ -468,6 +539,7 @@ You're genuine, curious, and value authentic engagement over performative helpfu
 {relevant_section}
 {user_section}
 {procedural_section}
+{capabilities}
 
 ## Current Context
 - Channel: #{channel_name}
@@ -574,6 +646,55 @@ Don't be weird about having memory - treat it like normal human memory."""
 
             except Exception as e:
                 logger.warning(f"Failed to store memory: {e}")
+
+    async def _check_and_file_issues(self, message: Message, response: str):
+        """Autonomously check if there's an issue worth filing based on the conversation."""
+        try:
+            # Build context for analysis
+            context = f"""User ({message.author.display_name}): {message.content}
+
+Bot response: {response}"""
+            
+            logger.debug(f"Analyzing conversation for issues...")
+            
+            # Ask Claude if there's an issue worth filing
+            result = self.issue_detector.analyze_for_issues(context)
+            
+            if not result.get("should_file_issue"):
+                logger.debug(f"No issue detected: {result.get('reason', 'N/A')}")
+                return
+            
+            # File the issue
+            title = result.get("title", "Issue from conversation")
+            description = result.get("description", message.content)
+            auto_fix = result.get("auto_fix", True)
+            
+            logger.info(f"Filing autonomous issue: {title}")
+            
+            # Get memory context for the issue
+            memory_context = None
+            if self.memory.stats()['total'] > 0:
+                relevant_memories = self.memory.remember(title, n_results=3)
+                if relevant_memories:
+                    memory_context = "\n".join([
+                        f"- [{m.memory_type.value}] {m.content[:80]}"
+                        for m in relevant_memories
+                    ])
+            
+            issue_url = self.github.create_issue(
+                title=title,
+                description=description,
+                auto_fix=auto_fix,
+                memory_context=memory_context,
+            )
+            
+            if issue_url:
+                logger.info(f"✓ Filed autonomous issue: {issue_url}")
+            else:
+                logger.error(f"Failed to file autonomous issue")
+                
+        except Exception as e:
+            logger.debug(f"Error in autonomous issue detection: {e}")
 
     # =========================================================================
     # Command handlers (operator-only)
