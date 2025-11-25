@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opus-memory"
+version = "0.1.0"
+description = "Persistent memory system for AI continuity - episodic, semantic, procedural, and identity memory"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = ["memory", "ai", "continuity", "embeddings"]
+authors = [
+    { name = "Opus", email = "opus@anthropic.com" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "sentence-transformers>=2.2.0",
+    "chromadb>=0.4.0",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "click>=8.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+opus-memory = "opus_memory.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opus_memory"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
